@@ -26,6 +26,9 @@ from qgis.core import QgsSettings
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
 
+from qgis.core import QgsProject, QgsVectorLayer, QgsWkbTypes, QgsField, QgsMapLayer, QgsCoordinateReferenceSystem,QgsCoordinateTransform
+from qgis.gui import QgsMapToolEmitPoint
+
 # Import the code for the dialog
 from .entension_qgis_dialog import ExtensionQgisDialog
 import os.path
@@ -46,6 +49,10 @@ class ExtensionQgis:
         self.iface = iface
         # initialize plugin directory
         self.plugin_dir = os.path.dirname(__file__)
+
+        self.canvas = self.iface.mapCanvas()
+        self.pointTool = QgsMapToolEmitPoint(self.canvas)
+
         # initialize locale
         locale = QgsSettings().value('locale/userLocale', QLocale().name())[0:2]
         locale_path = os.path.join(
@@ -177,8 +184,24 @@ class ExtensionQgis:
                 self.tr(u'&Entension Qgis'),
                 action)
             self.iface.removeToolBarIcon(action)
+    
 
+    def displayPoint(self, point):
 
+        scr_source= QgsCoordinateReferenceSystem("EPSG:3857")
+        scr_destintion= QgsCoordinateReferenceSystem("EPSG:4326")
+
+        transform= QgsCoordinateTransform(scr_source, scr_destintion, QgsProject.instance())
+
+        point_destination= transform.transform(point)
+
+        longitude = round(point_destination[0],5)
+        latitude = round (point_destination[1],5)
+
+        self.dlg.lablong.setText(f"Longitude:{longitude}")
+        self.dlg.lablat.setText(f"Latitude:{latitude}")
+        
+    
     def run(self):
         """Run method that performs all the real work"""
 
@@ -188,6 +211,16 @@ class ExtensionQgis:
             self.first_start = False
             self.dlg = ExtensionQgisDialog()
 
+        #Filtrer  les couches par point 
+        for layer in QgsProject.instance().mapLayers().values():
+            if layer.type() == QgsMapLayer.VectorLayer:
+                if layer.geometryType() == QgsWkbTypes.PointGeometry:
+                    self.dlg.comboListCouche.addItem(layer.name())
+
+  
+        self.pointTool.canvasClicked.connect(self.displayPoint)
+        self.canvas.setMapTool(self.pointTool)
+    
         # show the dialog
         self.dlg.show()
         # Run the dialog event loop
@@ -197,3 +230,5 @@ class ExtensionQgis:
             # Do something useful here - delete the line containing pass and
             # substitute with your code.
             pass
+
+
