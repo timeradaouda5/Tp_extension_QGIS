@@ -22,16 +22,20 @@
  ***************************************************************************/
 """
 from qgis.PyQt.QtCore import QLocale, QTranslator, QCoreApplication
-from qgis.core import QgsSettings
+from qgis.core import QgsSettings, QgsPointXY,QgsGeometry,QgsUnitTypes,QgsWkbTypes, QgsFeature,QgsFillSymbol
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
 
-from qgis.core import QgsProject, QgsVectorLayer, QgsWkbTypes, QgsField, QgsMapLayer, QgsCoordinateReferenceSystem,QgsCoordinateTransform
-from qgis.gui import QgsMapToolEmitPoint
+from qgis.core import QgsProject, QgsVectorLayer, QgsWkbTypes, QgsField, QgsMapLayer, QgsCoordinateReferenceSystem,QgsCoordinateTransform, QgsMessageLog
+from qgis.gui import QgsMapToolEmitPoint,  QgsMessageBar
 
 # Import the code for the dialog
 from .entension_qgis_dialog import ExtensionQgisDialog
 import os.path
+
+import json             
+import requests
+
 
 
 class ExtensionQgis:
@@ -184,7 +188,10 @@ class ExtensionQgis:
                 self.tr(u'&Entension Qgis'),
                 action)
             self.iface.removeToolBarIcon(action)
-    
+
+    #------------------------------------------------------------
+    # US2: Fonction coordonnées correspondantes au point cliqué
+    #------------------------------------------------------------
 
     def displayPoint(self, point):
 
@@ -198,10 +205,130 @@ class ExtensionQgis:
         longitude = round(point_destination[0],5)
         latitude = round (point_destination[1],5)
 
-        self.dlg.lablong.setText(f"Longitude:{longitude}")
-        self.dlg.lablat.setText(f"Latitude:{latitude}")
+        self.dlg.lablong.setText(f"Longitude: {longitude}")
+        self.dlg.lablat.setText(f"Latitude: {latitude}")
+        self.adresse(latitude,longitude)
+        self.buffer(point)
+
+    #-----------------------------------------------------------
+    # US3: Récuperation de l'adresse la plus proche
+    #-----------------------------------------------------------
+
+    def adresse(self, latitude, longitude):
+
+        # 1. Construire l'URL avec l'adresse
+        url = f"https://data.geopf.fr/geocodage/reverse?lat={latitude}&lon={longitude}&limit=1&type=housenumber"
+
+        # 2. Envoyer la requête
+        reponse = requests.get(url, timeout=5)
+
+        # 3. Lire la réponse
+        donnees = reponse.json()
+
+        data = donnees["features"][0]["properties"]["label"]
+
+        self.dlg.labAdresse.setText(f": {data}")
         
-    
+    #-----------------------------------------------------------
+    # US4: Zone tampon autour du point cliqué
+    #-----------------------------------------------------------
+
+    def buffer(self, point):
+
+        # Récupérer la couche choisie
+        nom_couche = self.dlg.comboListCouche.currentText()
+
+        couches = QgsProject.instance().mapLayersByName(nom_couche)
+
+        if not couches:
+                    self.iface.messageBar().pushMessage(
+                        "Erreur",
+                        "Aucune couche de points sélectionnée"
+                    )
+                    return
+
+        couche = couches[0]
+
+        # Récupérer la distance saisie
+        try:
+            distance = int(self.dlg.lineEditDistance.text())
+
+            if distance <= 0:
+                raise ValueError
+
+        except ValueError:
+            self.iface.messageBar().pushMessage(
+                "Erreur",
+                "Saisissez une distance entière positive"
+            )
+            return
+        # Transformer le point dans le SCR de la couche
+        crs_source = self.canvas.mapSettings().destinationCrs()
+        crs_destination = couche.crs()
+
+        transform = QgsCoordinateTransform(
+            crs_source,
+            crs_destination,
+            QgsProject.instance()
+        )
+        # Créer le buffer
+        geometrie_point = QgsGeometry.fromPointXY(point) 
+        geometrie_buffer = geometrie_point.buffer(distance,30)
+
+        geometrie_buffer.transform(transform)
+
+        # Compter les points dans le buffer
+        compteur = 0
+        
+        for feature in couche.getFeatures():
+
+            if feature.geometry().intersects(geometrie_buffer):
+                compteur += 1
+
+        self.iface.messageBar().pushMessage(
+            "Résultat",
+            f"Nombre de points dans le rayon : {compteur}"
+        )
+
+        self.dlg.labelresult.setText(f" {compteur}")
+        # US5 : afficher le buffer
+        self.creerBuffer(geometrie_buffer, couche.crs()) 
+
+    # --------------------------------------------------
+    # US5 : Affichage du buffer sur la carte
+    # --------------------------------------------------
+
+    def creerBuffer(self, geometrie_buffer, crs):
+       
+        anciennes_couches = QgsProject.instance().mapLayersByName("Zone Tampon Temporaire")
+        for couche in anciennes_couches:
+            QgsProject.instance().removeMapLayer(couche.id())
+
+        # RG1 : Créer la couche temporaire (mémoire)
+        couche_buffer = QgsVectorLayer(f"Polygon?crs={crs.authid()}", "Zone Tampon Temporaire", "memory")
+        
+        # Mots-clés demandés pour ajouter la géométrie
+        provider = couche_buffer.dataProvider()
+        feature = QgsFeature()
+        feature.setGeometry(geometrie_buffer)
+        
+        couche_buffer.startEditing()
+        provider.addFeatures([feature])
+        couche_buffer.commitChanges()
+        couche_buffer.updateExtents()
+
+        #Symbole sans remplissage (transparent) et contour noir fin
+        symbole = QgsFillSymbol.createSimple({
+            'color': 'transparent',       
+            'outline_color': '#000000',  
+            'outline_width': '0.3'        
+        })
+        couche_buffer.renderer().setSymbol(symbole)
+
+        # Afficher la couche sur la carte
+        QgsProject.instance().addMapLayer(couche_buffer)
+
+
     def run(self):
         """Run method that performs all the real work"""
 
@@ -211,7 +338,10 @@ class ExtensionQgis:
             self.first_start = False
             self.dlg = ExtensionQgisDialog()
 
-        #Filtrer  les couches par point 
+        #------------------------------------------------------------
+        # US1: Filtrer  les couches pour choisir que géometrie point 
+        #------------------------------------------------------------
+
         for layer in QgsProject.instance().mapLayers().values():
             if layer.type() == QgsMapLayer.VectorLayer:
                 if layer.geometryType() == QgsWkbTypes.PointGeometry:
@@ -220,6 +350,7 @@ class ExtensionQgis:
   
         self.pointTool.canvasClicked.connect(self.displayPoint)
         self.canvas.setMapTool(self.pointTool)
+       
     
         # show the dialog
         self.dlg.show()
@@ -230,5 +361,4 @@ class ExtensionQgis:
             # Do something useful here - delete the line containing pass and
             # substitute with your code.
             pass
-
 
